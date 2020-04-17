@@ -1,8 +1,13 @@
 import * as Yup from 'yup';
-import { startOfHour, parseISO, isBefore } from 'date-fns';
+import { startOfHour, parseISO, isBefore, format, subHours } from 'date-fns';
+import pt from 'date-fns/locale/pt';
+
 import User from '../models/User';
 import File from '../models/File';
 import Appointment from '../models/Appointment';
+import Notification from '../schemas/Notification';
+
+import Mail from '../../lib/Mail';
 
 class AppointmentController {
   async index(request, response) {
@@ -62,6 +67,12 @@ class AppointmentController {
         });
     }
 
+    if(request.userId === provider_id) {
+      return response.status(401).json({
+        error: 'Not permitted create appointments with yourself.'
+      });
+    }
+
     const hourStart = startOfHour(parseISO(date));
 
     if (isBefore(hourStart, new Date())) {
@@ -84,6 +95,58 @@ class AppointmentController {
       user_id: request.userId,
       provider_id,
       date: hourStart
+    });
+
+    /* Notify appointment provider */
+
+    const user = await User.findByPk(request.userId);
+    const formattedDate = format(
+      hourStart,
+      "'dia' dd 'de' MMMM', ás ' H:mm'h'",
+      { locale: pt }
+    );
+
+    await Notification.create({
+      content: `Novo agendamento de ${user.name} para ${formattedDate}`,
+      user: provider_id,
+    });
+
+    return response.json(appointment);
+  }
+
+  async delete(request, response) {
+    const appointment = await Appointment.findByPk(request.params.id, {
+      include: [
+        {
+          model: User,
+          as: 'provider',
+          attributes: ['name', 'email']
+        }
+      ]
+    });
+
+    if(appointment.user_id !== request.userId) {
+      return response.status(401).json({
+        error: "You don't have permission to cancel this appointment!"
+      });
+    }
+
+    const dateWithSub = subHours(appointment.date, 2);
+
+    if(isBefore(dateWithSub, new Date())) {
+      return response.status(401).json({
+        error: 'You can only cancel appointments 2 hours in advance!'
+      });
+    }
+
+    appointment.canceled_at = new Date();
+
+    await appointment.save();
+
+    await Mail.sendMail({
+      to: `${appointment.provider.name} <${appointment.provider.email}>`,
+      subject: 'Agendamento cancelado!',
+      text: 'Você tem um novo cancelamento!'
     });
 
     return response.json(appointment);
